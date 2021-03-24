@@ -1,0 +1,41 @@
+[bwa_index] Pack FASTA... 0.43 sec
+[bwa_index] Construct BWT for the packed sequence...
+[BWTIncCreate] textLength=128888334, availableWord=21068624
+[BWTIncConstructFromPacked] 10 iterations done. 34753182 characters processed.
+[BWTIncConstructFromPacked] 20 iterations done. 64202446 characters processed.
+[BWTIncConstructFromPacked] 30 iterations done. 90372990 characters processed.
+[BWTIncConstructFromPacked] 40 iterations done. 113629422 characters processed.
+[bwt_gen] Finished constructing BWT in 48 iterations.
+[bwa_index] 34.06 seconds elapse.
+[bwa_index] Update BWT... 0.30 sec
+[bwa_index] Pack forward-only FASTA... 0.26 sec
+[bwa_index] Construct SA from BWT and Occ... 15.05 sec
+[main] Version: 0.7.17-r1188
+[main] CMD: bwa index GCF_000001405.33_GRCh38.p7_chr20_genomic.fna
+[main] Real time: 50.779 sec; CPU: 50.104 sec
+[M::bwa_idx_load_from_disk] read 0 ALT contigs
+[M::process] read 100000 sequences (10000000 bp)...
+[M::process] read 94412 sequences (9441200 bp)...
+[M::mem_pestat] # candidate unique pairs for (FF, FR, RF, RR): (4, 39412, 0, 2)
+[M::mem_pestat] skip orientation FF as there are not enough pairs
+[M::mem_pestat] analyzing insert size distribution for orientation FR...
+[M::mem_pestat] (25, 50, 75) percentile: (323, 343, 363)
+[M::mem_pestat] low and high boundaries for computing mean and std.dev: (243, 443)
+[M::mem_pestat] mean and std.dev: (343.19, 26.73)
+[M::mem_pestat] low and high boundaries for proper pairs: (203, 483)
+[M::mem_pestat] skip orientation RF as there are not enough pairs
+[M::mem_pestat] skip orientation RR as there are not enough pairs
+[M::mem_process_seqs] Processed 100000 reads in 9.467 CPU sec, 9.499 real sec
+[M::mem_pestat] # candidate unique pairs for (FF, FR, RF, RR): (5, 37060, 0, 1)
+[M::mem_pestat] skip orientation FF as there are not enough pairs
+[M::mem_pestat] analyzing insert size distribution for orientation FR...
+[M::mem_pestat] (25, 50, 75) percentile: (323, 343, 363)
+[M::mem_pestat] low and high boundaries for computing mean and std.dev: (243, 443)
+[M::mem_pestat] mean and std.dev: (343.37, 26.81)
+[M::mem_pestat] low and high boundaries for proper pairs: (203, 483)
+[M::mem_pestat] skip orientation RF as there are not enough pairs
+[M::mem_pestat] skip orientation RR as there are not enough pairs
+[M::mem_process_seqs] Processed 94412 reads in 9.091 CPU sec, 9.121 real sec
+[main] Version: 0.7.17-r1188
+[main] CMD: bwa mem GCF_000001405.33_GRCh38.p7_chr20_genomic.fna read_1.fastq read_2.fastq
+[main] Real time: 19.116 sec; CPU: 18.799 sec
