@@ -1,0 +1,20 @@
+Mar 23 23:06:11 ..... started STAR run
+Mar 23 23:06:11 ... starting to generate Genome files
+Mar 23 23:06:12 ..... processing annotations GTF
+Mar 23 23:06:13 ... starting to sort Suffix Array. This may take a long time...
+Mar 23 23:06:13 ... sorting Suffix Array chunks and saving them to disk...
+Mar 23 23:06:57 ... loading chunks from disk, packing SA...
+Mar 23 23:06:59 ... finished generating suffix array
+Mar 23 23:06:59 ... generating Suffix Array index
+Mar 23 23:07:03 ... completed Suffix Array index
+Mar 23 23:07:03 ..... inserting junctions into the genome indices
+Mar 23 23:07:14 ... writing Genome to disk ...
+Mar 23 23:07:14 ... writing Suffix Array to disk ...
+Mar 23 23:07:14 ... writing SAindex to disk
+Mar 23 23:07:14 ..... finished successfully
+Mar 23 23:07:14 ..... started STAR run
+Mar 23 23:07:15 ..... loading genome
+Mar 23 23:07:15 ..... started mapping
+Mar 23 23:09:12 ..... finished mapping
+Mar 23 23:09:12 ..... started sorting BAM
+Mar 23 23:10:36 ..... finished successfully
