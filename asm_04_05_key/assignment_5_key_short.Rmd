@@ -1,0 +1,408 @@
+---
+title: 'Assignment 5: ChIP-seq and gene regulation'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Setting the default for engine.opts to make running bash chunks easier.
+knitr::opts_chunk$set(echo = TRUE, engine.opts = "-l")
+```
+
+## Introduction
+
+In this assignment, you will be analyzing ChIP-Seq & RNA-Seq data to investigate gene regulation in the development of spinal motor neurons in mice. The data is retrieved from [a study from the Mazzoni lab](https://pubmed.ncbi.nlm.nih.gov/27939218/) and is trimmed, aligned/quantified, deduplicated (for ChIP-Seqs), and indexed for you. For the pre-processing scripts, please refer to pre-process.html if you are interested.
+
+You can find the files you need in `/scratch/work/courses/AppliedGenomics2021Sec3/assignment05`. In this folder, you will find:
+
+- `align/`: Containing indexed BAM files for input and Lhx3 ChIP-Seq at 12 and 48 hours.
+- `HOCOMOCOv11_core_MOUSE_mono_meme_format.meme`: MEME-compatible motif database from [HOCOMOCO](https://hocomoco11.autosome.ru) (for MEME-ChIP)
+- `Mus_musculus.GRCm38.dna.toplevel.fa`: A soft link to GRCm38 reference genomic FASTA (used in `bedtools getfasta`)
+- `metadata.tsv`: A tab-separated file containing the information of the samples.
+
+
+## Analysis
+
+### Quality control
+
+Please prepare two fingerprint plots for the ChIP-Seq data from 12 hr and 48 hr respectively. You can use `plotFingerprint` from `deeptools`to do this. The fragment size of the data is 500 bp.
+
+- Upload the two plots & the sbatch script (suggested: It could take a while to run) (10%)
+
+```
+# Usage of the function
+## Replace the thing flanked by square brackets. Don't keep the square brackets
+## Thing in parenthesis is just explanation but not a part of the command.
+## https://deeptools.readthedocs.io/en/develop/content/tools/plotFingerprint.html
+
+plotFingerprint -b [path to BAM files to compare] \
+                --extendReads [Optional for pair-ended data (can be inferred), for single-ended data, put fragment size hear] \
+                --ignoreDuplicates (If you add this flag, duplicated reads will not be counted) \
+                --labels [Figure legends in the same order of your BAM files (e.g., "Sample1" "Sample2")] \
+                --plotTitle [Title of the plot] \
+                -p [Number of the cores to use. Default to 1; setting to max will use all available cores] \
+                --minMappingQuality [Minimal mapQ score to be counted] \
+                --skipZeros (If you add this flag, regions that have no reads in all BAM will be ignored) \
+                -o [Path of your output file]
+```
+
+- Describe what you see in the plots. Do you see something unexpected? (10%)
+
+Opposed to a diagonal line that we expect from an ideal input, input DNA from 12 and 48 hr were not perfectly uniform. Lhx3 ChIP-seq at 12 hours looks very similar to input, while Lhx3 ChIP-seq at 48 hours seems to be more enriched in few regions. This could either indicate the binding of Lhx3 is weak at 12 hours (thus the real bound region is few and weak) or lower quality ChIP.
+
+```
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=3:00:00
+#SBATCH --mem=8GB
+#SBATCH --job-name=fpplot
+#SBATCH --account=class
+#SBATCH --output=jobscript/log/fpplot_slurm_%j.out
+
+module purge
+module load deeptools/3.5.0
+
+
+# SRR3390053	Input	12hr
+# SRR3390056	Lhx3	12hr
+# SRR3390069	Input	48hr
+# SRR3390073	Lhx3	48hr
+
+# --skipZeros ignores regions where all samples have only zeros
+#             (we care more about how out sample compares to inputs anyway)
+# --minMappingQuality Ignore anything below the specified MAPQ. The dataset has
+#                     been filtered to keep MAPQ > 30, so the setting here has no
+#                     actual impact
+# --ignoreDuplicates This and filtering for MAPQ are recommended for ChIP-seq
+#                    because the input concentration tends to be lower and is 
+#                    more prone to noise (compared to whole genome sequencing or
+#                    transcriptomic studies)
+
+plotFingerprint -b align/SRR3390053_dedup.bam align/SRR3390056_dedup.bam \
+                   --extendReads 500 --ignoreDuplicates \
+                   --labels "Input" "ChIP-seq(Lhx3)" \
+                   --plotTitle "12 hr" \
+                   -p max \
+                   --minMappingQuality 30 --skipZeros \
+                   -o 12hr_fingerprint.png
+                   
+plotFingerprint -b align/SRR3390069_dedup.bam align/SRR3390073_dedup.bam \
+                   --extendReads 500 --ignoreDuplicates \
+                   --labels "Input" "ChIP-seq(Lhx3)" \
+                   --plotTitle "48 hr" \
+                   -p max \
+                   --minMappingQuality 30 --skipZeros \
+                   -o 48hr_fingerprint.png
+                   
+```
+
+![](12hr_fingerprint.png)
+
+![](48hr_fingerprint.png)
+
+## Differential peak calling visualization
+
+### Differentially-bound region between stages (20%)
+
+Besides Limma, which provides `csaw` that allows us to find differential binding when sufficient number of replicates are provided, many peak callers also offer differential binding analysis, and `MACS2` is among them.
+
+The description of `MACS2`'s approach can be found [here](https://github.com/macs3-project/MACS/wiki/Call-differential-binding-events). Please use this function to identify peaks that are differentially bound by Lhx3 at 12 and 48 hr.
+
+**Note that there were a mistake in the instruction of the assignment. While it does not influence the assignment per se, in `macs2 bdgdiff` `-d1` and `-d2` should be the lower number of tags after filtering of control/treatment. (It made no difference because the treatment group has a lower number of tags in this dataset)**
+
+```
+# Usage of the function
+## Replace the thing flanked by square brackets. Don't keep the square brackets
+## Thing in parenthesis is just explanation but not a part of the command.
+## https://github.com/macs3-project/MACS/wiki/Call-differential-binding-events
+
+# 1. For each sample, run MACS2 with `-B` to generate bedGraphs for the tracks.
+macs2 callpeak -B -t [Path to the experiment BAM] \
+               -c [Path to the input/control BAM] \
+               -n [Label for this sample (e.g., "12hr")] \
+               --nomodel \
+               --extsize [Can be decided by predictd, or use 200 for most ChIP-Seq experiments]
+               
+# 2. Run `macs2 bdgdiff` with the bedgraph files generated from the previous step
+macs2 bdgdiff --t1 [treat pileup bdg from the first condition] \
+              --c1 [background bdg from the first condition] \
+              --t2 [treat pileup bdg from the second condition] \
+              --c2 [background bdg from the first condition] \
+              --d1 [the lower number of tags after filtering in control/treatment for the first condition; can be found in the xls file generated from the previous step] \
+              --d2 [the lower number of tags after filtering in control/treatment for the second condition] \
+              --o-prefix [A label to prefix your peak files (e.g., you'll get prefix_cond1.bed, prefix_cond2.bed, and prefix_common.bed)]
+```
+
+```
+module purge
+module load macs2/intel/2.2.7.1
+
+# Ran in ./peak
+
+macs2 callpeak -B -t ../align/SRR3390056_dedup.bam -c ../align/SRR3390053_dedup.bam \
+               -n 12hr --nomodel --extsize 200
+macs2 callpeak -B -t ../align/SRR3390073_dedup.bam -c ../align/SRR3390069_dedup.bam \
+               -n 48hr --nomodel --extsize 200
+               
+macs2 bdgdiff --t1 12hr_treat_pileup.bdg --c1 12hr_control_lambda.bdg --t2 48hr_treat_pileup.bdg \
+   --c2 48hr_control_lambda.bdg --d1 15203050 --d2 6921034 --o-prefix diff_c1_vs_c2
+```
+
+
+### Visualizing coverage and peaks (20%)
+
+It is often feasible to check the ChIP-seq signal around some genes that we know a priori that the ChIPed protein is bound to as a sanity check, and this can be done by loading a bigWig file and the peak files to IGV.
+
+bigWig is a light-weight version file containing coverage information and can be generated from aligned BAM files with `bamCoverage` provided by `deeptools`.
+
+Please set `--scaleFactor=1`, `--extendReads 500`, and `--normalizeUsing RPKM`.
+
+
+```
+# Usage of the function
+## Replace the thing flanked by square brackets. Don't keep the square brackets
+## Thing in parenthesis is just explanation but not a part of the command.
+## https://deeptools.readthedocs.io/en/develop/content/tools/bamCoverage.html
+
+bamCoverage --bam [Path to BAM file] \
+            -o [Path to save the output] \
+            --normalizeUsing [Normalization method, use RPKM here] \
+            --ignoreForNormalization [Chromosomes to ignore for normalization, set X here] \
+            --outFileFormat [bigwig or bedgraph] \
+            -p [Number of cores to use, set to max to use all] \
+            --extendReads [Required for single-ended sequencing, set to fragment length = 500]
+```
+
+```
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=1:00:00
+#SBATCH --mem=16GB
+#SBATCH --job-name=bw
+#SBATCH --account=class
+#SBATCH --output=jobscript/log/bw_slurm_%j.out
+#SBATCH --array=1-4
+
+# SRR3390053	Input	12hr
+## SRR3390056	Lhx3	12hr
+# SRR3390069	Input	48hr
+## SRR3390073	Lhx3	48hr
+
+module purge
+module load deeptools/3.5.0
+
+srr=$(awk "NR==${SLURM_ARRAY_TASK_ID}" data/SRR_list.txt)
+
+bamCoverage --bam align/${srr}_dedup.bam \
+            -o bigWig/${srr}.bw \
+            --normalizeUsing RPKM \
+            --ignoreForNormalization X \
+            --outFileFormat bigwig \
+            -p max \
+            --extendReads 500
+```
+
+Load all 4 bigWig tracks (input and Lhx3 ChIP-Seq at two time points) to IGV using mm10 annotation, and navigate to Slit2.
+
+**Save the screenshot (File > Save Image) and describe how the binding of Lhx3 changes between 12 - 48 hours of the reprogramming process.**
+
+You might want to select all the track (hold shift) and right click to select "Group autoscale" to make sure the scale of every track dynamically changes according to the region you are examining but remain the same for every track.
+
+An example screenshot of an unrelated gene looks like this:
+
+![](slit2.png)
+
+The binding of Lhx3 increases from 12 hours to 48 hours in Slit2. This change can be seen from the number of normalized reads detected at an intro of Slit2 and is captured by `MACS2` and called as a differential peak for condition 2 (48 hours).
+
+### Visualize ChIP-seq signal around Lhx3 peaks (20%)
+
+In the previous section, you should obtain 3 BED files containing peaks that are preferentially bound at 12 hr, at 48 hr, and are commonly bound at both stages. To understand the cooperation and interaction between transcription factors and chromatin landscape, we are going to use a profile heatmap to show the signal intensity of Lhx3, Isl1, and H3K27ac ChIP-Seq at 12 and 48 hr around Lhx3 peaks that are differentially bound between stages.
+
+`deeptools` provides a convenient command, `computeMatrix`, which allows you to provide multiple BED files that contains the region of interest, and to calculate intesity score around these regions with scaling (`scale-regions` mode, for making metagene plots) or without scaling (`reference-point` mode, for making (mean) profile plots).
+
+We will be using `reference-point` mode and examine 2kb up/downstream of the `center` of our differentially bound peaks. The intensity of ChIP-Seq for Lhx3, Isl1, and H3K27ac will be calculated from the bigWig files we generated for visualization.
+
+`computeMatrix` will generate a zipped matrix file which can be later used by `plotHeatmap` to make a faceted heatmap with profile plots.
+
+Please upload a PNG file that contains the intensity heatmap and profile plot of the six tracks of ChIP-Seq for the Lhx3 differential bound peaks. You can also insert the plot here in the Rmarkdown file.
+
+
+```
+# Usage of the function
+## Replace the thing flanked by square brackets. Don't keep the square brackets
+## Thing in parenthesis is just explanation but not a part of the command.
+## https://deeptools.readthedocs.io/en/develop/content/tools/computeMatrix.html
+
+
+computeMatrix [Mode of running, can be reference-point or scale-regions] \
+       --referencePoint [The position to extend the region to plot, can be TSS (start of region), center, or TES (end of the region)] \
+       -b [Length of plotting upstream (e.g., 2000 = 2000 base pair upstream of the reference point)] \
+       -a [Length of plotting downstream (e.g., 2000 = 2000 base pair downstream of the reference point)] \
+       -R [Bed files containing the region of interest (e.g., peak BED, TSS of genes of interest)] \
+       -S [BigWig files of tracks (converted from BAM)] \
+       -o [Path to save the computed matrix (used in plotting)] \
+       -p [Number of cores to use] \
+       --samplesLabel [Optional, labels of the tracks (e.g., "Input 12hr" "Input 48hr" "Lhx3 12hr" "Lhx3 48hr")] \
+       --outFileSortedRegions [Path to save a BED file containing the regions computed]
+       
+       
+## https://deeptools.readthedocs.io/en/develop/content/tools/plotHeatmap.html
+plotHeatmap -m [Computed matrix from computeMatrix above] \
+            -out [Path to save the plot (PNG files)]
+
+```
+
+```
+module purge
+module load deeptools/3.5.0
+
+# Commented out because the extreme difference between peak number makes visualization tricky
+# computeMatrix reference-point \
+#        --referencePoint center \
+#        -b 2000 -a 2000 \
+#        -R peak/common_no_MT.bed peak/cond1_no_MT.bed peak/diff_c1_vs_c2_c3.0_cond2.bed\
+#        -S bigWig/SRR3390053_new.bw  bigWig/SRR3390056_new.bw bigWig/SRR3390069_new.bw bigWig/SRR3390073_new.bw \
+#        --skipZeros \
+#        --missingDataAsZero \
+#        -o profile_plot/Lhx3_12_48_test.gz \
+#        -p max \
+#        --samplesLabel "Input.12hr" "Lhx3.12hr" "Input.48hr" "Lhx3.48hr" \
+#        --outFileSortedRegions profile_plot/regions_Lhx3_12_48_test.bed
+#        
+# plotHeatmap -m profile_plot/Lhx3_12_48_test.gz \
+#       --colorList 'white,blue' \
+#       -out profile_plot/deg_Lhx3_12_48_test.png 
+
+# Plot 3 plots due to the extreme difference of peak numbers
+## Common
+computeMatrix reference-point \
+       --referencePoint center \
+       -b 2000 -a 2000 \
+       -R peak/diff_c1_vs_c2_c3.0_common.bed \
+       -S bigWig/SRR3390053_new.bw  bigWig/SRR3390056_new.bw bigWig/SRR3390069_new.bw bigWig/SRR3390073_new.bw \
+       --skipZeros \
+       --missingDataAsZero \
+       -o profile_plot/Lhx3_12_48_co.gz \
+       -p max \
+       --samplesLabel "Input.12hr" "Lhx3.12hr" "Input.48hr" "Lhx3.48hr" \
+       --outFileSortedRegions profile_plot/regions_Lhx3_12_48_co.bed
+       
+plotHeatmap -m profile_plot/Lhx3_12_48_co.gz \
+      --colorList 'white,blue' \
+      --plotTitle "Common peaks"\
+      -out profile_plot/deg_Lhx3_12_48_co.png 
+      
+## 12 hr (condition 1)
+computeMatrix reference-point \
+       --referencePoint center \
+       -b 2000 -a 2000 \
+       -R peak/diff_c1_vs_c2_c3.0_cond1.bed \
+       -S bigWig/SRR3390053_new.bw  bigWig/SRR3390056_new.bw bigWig/SRR3390069_new.bw bigWig/SRR3390073_new.bw \
+       --skipZeros \
+       --missingDataAsZero \
+       -o profile_plot/Lhx3_12_48_c1.gz \
+       -p max \
+       --samplesLabel "Input.12hr" "Lhx3.12hr" "Input.48hr" "Lhx3.48hr" \
+       --outFileSortedRegions profile_plot/regions_Lhx3_12_48_c1.bed
+       
+plotHeatmap -m profile_plot/Lhx3_12_48_c1.gz \
+      --colorList 'white,blue' \
+      --plotTitle "12hr-enriched peaks" \
+      -out profile_plot/deg_Lhx3_12_48_c1.png 
+      
+## 48 hr (condition 2)
+computeMatrix reference-point \
+       --referencePoint center \
+       -b 2000 -a 2000 \
+       -R peak/diff_c1_vs_c2_c3.0_cond2.bed \
+       -S bigWig/SRR3390053_new.bw  bigWig/SRR3390056_new.bw bigWig/SRR3390069_new.bw bigWig/SRR3390073_new.bw \
+       --skipZeros \
+       --missingDataAsZero \
+       -o profile_plot/Lhx3_12_48_c2.gz \
+       -p max \
+       --samplesLabel "Input.12hr" "Lhx3.12hr" "Input.48hr" "Lhx3.48hr" \
+       --outFileSortedRegions profile_plot/regions_Lhx3_12_48_c2.bed
+       
+plotHeatmap -m profile_plot/Lhx3_12_48_c2.gz \
+      --colorList 'white,blue' \
+      --plotTitle "48hr-enriched peaks"\
+      -out profile_plot/deg_Lhx3_12_48_c2.png 
+```
+
+![](profile_plot/deg_Lhx3_12_48_test.png)
+If you plot everything together (which is recommended most of the time for easy comparison), you'll notice that you cannot see the peaks enriched at 12 hour. This is because there are only 5 of them, so if we plot them individually.
+
+You can see that there are few peaks enriched at 12-hour Lhx3 ChIP-seq.
+
+![](profile_plot/deg_Lhx3_12_48_c1.png)
+
+And there are a lot of peaks found in 48-hr Lhx3 ChIP-seq. This is consistent with what we saw in the fingerprint plot, but we still cannot distinguish whether this is biological or technical.
+
+![](./profile_plot/deg_Lhx3_12_48_c2.png)
+
+You might notice from the combined plot that the mean read number for input for common peaks is sky high and wonder why. If you did not, it's even more obvious in the individual plot:
+
+![](./profile_plot/deg_Lhx3_12_48_co.png)
+
+The individual plot made it obvious that there are few peaks that contains so many reads that makes everything else seems insignificant. What are those?
+
+Mitochondria have their own genome, and perhaps because there are multiple mitochondria per cell, sometimes mitochondrial genome behaves a bit funky in genome sequencing. This is more common in ATAC-Seq where Tn5 transposase favors mitochondrial genome and if not treated specifically, sometimes you get a dataset in which >90% of the reads come from the mitochondria.
+
+This is less of an issue in ChIP-seq, but we do still see many mitochondrial reads (check the scale at the upper-left corner of each track and compare it to that of Slit2), and because there are common peaks in the mitochodrial genome, the average number of reads for input because inflated because of these peaks. The average for condition 2 (48 hours) is less influenced because of there are > 5 times more peaks assigned to it, so the number gets averaged out compared to the common peaks.
+
+![](mito.png)
+
+### Motif discovery for Lhx3 binding sites (20%)
+
+Finally, please use [MEME-ChIP](https://meme-suite.org/meme/doc/meme-chip.html?man_type=web) or [HOMER](http://homer.ucsd.edu/homer/) to perform motif enrichment analysis.
+If you were to use MEME-ChIP, you'll want to utilize `bedtools getfasta` to retrieve the actual sequence corresponding to the peak coordinates.
+
+You need to attach the script you used to perform motif discovery here or submit it as an individual file to NYU Classes. The report for both MEME-ChIP and HOMER is a folder. Please compress the folder as a tar.gz file and submit it to NYU Classes.
+
+```
+# Usage of the function
+## Replace the thing flanked by square brackets. Don't keep the square brackets
+## Thing in parenthesis is just explanation but not a part of the command.
+
+###### getfasta ######
+## https://bedtools.readthedocs.io/en/latest/content/tools/getfasta.html
+bedtools getfasta -fi [path to reference genome fasta] -bed [path to peak BED]
+
+###### MEME-ChIP ######
+##### meme/openmpi/intel/5.3.0
+## https://meme-suite.org/meme/doc/meme-chip.html
+
+meme-chip -o [Path to an output folder] \
+          -db [(Optional) Path to a motif database so MEME can find similar known motifs from it]
+          [Path to a FASTA file containing your peaks]
+```
+
+```
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=5:00:00
+#SBATCH --mem=16GB
+#SBATCH --job-name=meme
+#SBATCH --account=class
+#SBATCH --output=jobscript/log/meme_slurm_%j.out
+
+module purge
+module load bedtools/intel/2.29.2
+module load meme/openmpi/intel/5.3.0
+
+## Finding enriched motifs for 48-hr enriched peaks
+bedtools getfasta -fi GRCm38.p2/Mus_musculus.GRCm38.dna.toplevel.fa \
+                  -bed peak/diff_c1_vs_c2_c3.0_cond2.bed > cond2.fa
+                  
+meme-chip -o meme_48hr \
+          -db HOCOMOCOv11_core_MOUSE_mono_meme_format.meme \
+          cond2.fa 
+                  
+                  
+```
+

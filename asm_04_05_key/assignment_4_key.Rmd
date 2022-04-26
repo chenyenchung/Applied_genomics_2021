@@ -1,0 +1,485 @@
+---
+title: "Differential expression analysis with RNA-Seq"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library(dplyr)
+library(biomaRt)
+library(edgeR)
+library(limma)
+```
+
+## Introduction
+
+We are analyzing RNA-Seq profiling of spinal motor neurons in wild-type and mutants of Pbx, a gene involved in development of body plan.
+
+With this assignment, we aim to practice the following:
+
+1. Know your data (15%)
+
+2. Practice the use of pseudoaligners for RNA-Seq and assess the mapping rate (10%)
+
+3. Prepare design matrix (5%)
+
+4. Load the read count table (10%) and then perform filtering (5%) and normalization (10%) for RNA-Seq data
+
+5. Visualize samples with MDS and describe them (5%) 
+
+6. Identify differentially expressed genes (10%)
+
+7. Perform gene set enrichment analysis and GO to find dysregulated pathways in mutant neurons (15% each).
+
+
+## Provided data
+
+You can find the sequencing result and reference transcriptomem file (not indexed) in `assignment_4`.
+
+- In `data`, you can find:
+  - 12 `fastq` files, corresponding to 6 samples of RNA-Seq
+  - `txkey.rds`: Conversion table between transcript ids and gene ids
+  - `metadata.csv`: A csv file containing genotype and replicate information of all samples.
+- In `GRCm39/`, you can find a fasta file of human transcriptome and a gene model file.
+- In `MSigDB`, you can find a gene set file containing hallmark gene sets.
+  
+You'll need to install the following packages:
+
+- `dplyr` (with `install.packages()`)
+- `limma` (From Bioconductor)
+- `edgeR` (From Bioconductor)
+- `biomaRt` (From Bioconductor)
+- `GO.db` (From Bioconductor)
+- `org.Mm.eg.db` (From Bioconductor)
+- `BiasedUrn` (From Bioconductor)
+  
+## Know your data
+
+The data is retrieved from [GEO dataset](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE84271). From the information provided in the website and/or the original article where the dataset was reported, answer the following questions:
+
+1. What is the sample? Include the species and cell type. This information tells you the reference genome that should be used and allows you to expect the expression of certain genes in experiments properly performed. (3%)
+
+The sample is sorted mouse spinal motor neuron.
+
+2. What is the protocol/reagent used to amplify the cDNA and generate the library? This information is usually provided in the pages for individual samples but not in the main page. It allows you to select the adapter and primer sequences to use when trimming the data. (3%)
+
+Ovation RNA-Seq System V2 kit 
+
+3. What is the read length? With the growing popularity of long-read sequencing technique, it is also important to know which platform was used to sequence the samples. (3%)
+
+Illumina HiSeq 2500
+
+4. If the samples are sequenced with Illumina platform, are they pair-ended or single-ended? (3%)
+
+Paired (50 bp read-length)
+
+5. Is the library strand-specific? This is dependent on the kit used to generate the library, so check the manufacturer's website. (3%)
+
+Not strand-specific. They did not specify this in the manual of the V2 kit, but you can see that Ovation also provides strand-specific products, and they do mentiond it's strand-specific for those kits.
+
+
+## Alignment & read counting
+
+You'll need to submit the sbatch file for read mapping with `Kallisto` (5%) and the rate of pseudoalignment for each sample (can be found as `p_pseudoaligned` in `run_info.json`, 5%).
+
+
+### Kallisto indexing
+```
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=1:00:00
+#SBATCH --mem=32GB
+#SBATCH --job-name=kallisto
+#SBATCH --mail-type=END
+#SBATCH --account=class
+#SBATCH --mail-user=ycc520@nyu.edu
+
+module purge
+module load kallisto/0.46.1
+
+kallisto index -i GRCm39_kallisto GRCm39/Mus_musculus.GRCm39.all.fa
+```
+
+### Kallisto mapping
+
+```
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=1:00:00
+#SBATCH --mem=32GB
+#SBATCH --job-name=kallisto
+#SBATCH --mail-type=END
+#SBATCH --account=class
+#SBATCH --mail-user=ycc520@nyu.edu
+#SBATCH --output=kallisto_log/slurm_%j.out
+#SBATCH --array=24-35
+
+module purge
+module load kallisto/0.46.1
+
+kallisto quant -i ../GRCm39_kallisto \
+               -o ../result/kallisto/SRR38310${SLURM_ARRAY_TASK_ID} \
+               SRR38310${SLURM_ARRAY_TASK_ID}_1.fastq SRR38310${SLURM_ARRAY_TASK_ID}_2.fastq
+```
+
+### Aligning rate
+
+From SRR3831024-35:
+53.6%
+53.7%
+52.9%
+52.9%
+53.7%
+53.7%
+55.9%
+55.9%
+57.2%
+57.2%
+53.4%
+53.4%
+
+This is rather low, and if this is your experiment, you should be alarmed. This is suboptimal and should prompt you to investigate what went wrong in sample preparation.
+
+I did alignment for this dataset with STAR and Bowtie2 (because the authors used Bowtie1; see below) but the unaligned rate remains similar (~40%).
+
+Interestingly, the authors used Bowtie1 to align and removed PCR duplicates before aligning and got a ~90% alignment rate (See [the original repo from the authors](https://github.com/dasenlab/Pbx-Neuron-Paper/tree/master/reads_processing). This might indicate the unmapped reads are PCR duplicates, but please note that using Bowtie (splicing-unaware aligner) and removing PCR-duplicates with Picard in RNA-seq are both not advised as of today.
+
+Removing PCR duplicates in RNA-Seq is trickier for Picard's algorithm, and the standard way to do this is to use unique molecular identifier in library preparation instead.
+
+### Generation of sample metadata
+
+```{r}
+metadata <- data.frame(
+  run_id = paste0("SRR38310", c(24:35)),
+  genotype = c(rep("WT", 6), rep("PbxMut", 6)),
+  biorep_id = c(rep(c(1:3), each = 2), rep(c(1:3), each = 2)),
+  techrep_id = rep(c(1:2), 6)
+)
+write.csv(metadata, "data/metadata.csv", row.names = FALSE)
+
+```
+
+
+### Generation of transcript -> gene key
+
+```{r}
+library(rtracklayer)
+txgtf <- as.data.frame(rtracklayer::readGFF("GRCm39/transcript_only.gtf"))
+txgtf <- txgtf[ , c("gene_id", "transcript_id")]
+saveRDS(txgtf, "data/txkey.rds")
+```
+
+
+## Generate design matrix from metadata (5%)
+
+In this assignment, we mainly care about differences between genotypes, so let's generate a design matrix containing this information. See the lecture for details about a design matrix.
+
+
+```{r}
+metadata <- read.csv("data/metadata.csv")
+
+# What a design matrix does is to tell limma or other modeling package
+# what each sample are
+# By default, if we don't specify the order of the sample labels (e.g., genotype)
+# model.matrix() will sort by alphabetical order and use the first one as
+# the baseline.
+# Instead, we usually want WT to be the baseline
+# To achieve that, we need to convert the genotype to a factor &
+# relevel it to make "WT" to be the first level = baseline.
+
+metadata$genotype <- as.factor(metadata$genotype)
+metadata$genotype <- relevel(metadata$genotype, "WT")
+
+design_mtx <- model.matrix(~genotype, metadata)
+print(design_mtx)
+```
+
+
+Note that in the metadata, you can see that they have technical replicates (sequencing the same library twice). We know all the samples were pooled and sequenced twice (in which different samples are distinguished with sample index multiplexing), but unfortunately, they did not specify which samples were sequenced together.
+
+The ideal way to deal with technical replicates were to use a blocking design. With `limma`, you will create your design matrix with `model.matrix(~genotype+batch, metadata)`, so `limma` considers batch info. Since we weren't able to do that (the technical replicate ID is given arbitrarily), we can also average the technical replicates before further analysis (this is also the approach the authors took).
+
+To simplify the assignment, you weren't asked to do the averaging nor using a blocked design, but it's something that might be nice to know.
+
+## Prepare gene-count matrix (10%)
+
+### Load Kallisto results from the result folder
+
+It is important to have the input and output of your tools in mind. In this case, we are going to use `edgeR` and `limma` to analyze our data, and both tools take a count matrix as your input.
+
+The format of the count matrix is this: Every row is a gene, and every column is a sample. The gene names/ids are stored in the row names, while the sample names/ids are in the column names.
+
+You can perform this process in R. If you are not familiar with R and struggle a lot, you can also try to open the `tsv` files from Kallisto in Excel and manually merge them. In this case, when you copy and paste, be careful to check if the order of genes are the same between output files. If you are using a spreadsheet, saving as `.csv` and use `read.csv()` to read it back into R.
+
+```{r}
+# Load Kallisto results
+file_paths <- paste0("result/kallisto/", metadata$run_id, "/abundance.tsv")
+
+# Merge individual tables
+counts_tb <- mapply(x = file_paths,
+                    y = paste(metadata$genotype, 
+                              metadata$biorep_id, 
+                              metadata$techrep_id,
+                              sep = "."),
+                 FUN = function(x, y) {
+                   result <- read.delim(x)[ c("target_id", "est_counts")]
+                   colnames(result)[2] <- y
+                   return(result)
+                 }, SIMPLIFY = FALSE)
+
+counts_tb <- Reduce(function(x, y) merge(x, y, by = "target_id"),
+                    counts_tb)
+
+head(counts_tb)
+```
+
+Note that target ids from Kallisto are versioned (e.g., ENST00000000412**.8**), to remove those, you'll need to use the function below.
+
+```{r}
+# Try these two lines to see how to remove those
+example_ids <- c("ENST00000000412.8", "ENST00000003583.12")
+example_ids_removed <- gsub("\\..*", "", example_ids)
+```
+
+### Convert the transcript ids to gene ids/symbols
+
+Note that Kallisto counts reads at transcript level. In this assignment, we are doing analysis per gene, so we need to sum up all the counts from every transcript from the same gene.
+
+To perform this step, you need to have a data frame. In the data frame, each column is est_counts from a sample, and each row is a transcript. You need to have the column for transcript names named `target_id`, which is the default for Kallisto, but in case you changed it...
+
+The following in an example code aggregating transcript-level read count to gene-level. You'll need to change it if your data.frame format is not designed as the same as mine.
+
+```{r}
+# Remove the version number
+counts_tb$target_id <- gsub("\\..*", "", counts_tb$target_id)
+
+# Load the conversion table
+txgtf <- readRDS("data/txkey.rds")
+counts_tb <- merge(txgtf, counts_tb, 
+                   by.x = "transcript_id",
+                   # In case your transcript name column is not target_id,
+                   # you should change this line below
+                   by.y = "target_id")
+
+# Aggregate transcript counts from the same gene to get counts per gene
+counts_gene <- group_by(counts_tb, gene_id) %>%
+  dplyr::select(-transcript_id) %>%
+  summarize_all(sum)
+
+
+
+# Drop the gene id column
+counts <- as.data.frame(counts_gene[ , -1])
+row.names(counts) <- counts_gene$gene_id
+
+head(counts)
+```
+
+### Convert Ensembl gene ids to Entrez/NCBI gene ids
+
+Yes, I know it's a lot of conversion, but it's a good time to emphasize that there are many naming/numbering systems in genomics. It's important to use one that fits your downstream analysis. In this case, because our GSEA and GO database are Entrez ID-based, we are going to convert to Entrez ID to save ourselves a bit of trouble later.
+
+`biomaRt` provides a way to convert commonly used ids and symbols, as showed below. As usual, your variable naming will be different from mine, and you need to edit the code to make it work.
+
+```{r}
+# Convert Ensembl ids to Entrez ids to allow GSEA and GO
+
+## Establish connection with Ensembl, an online database
+## and ask for mouse-related data
+ensembl <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+## My Voom-processed object is called bra_v, and you'll need to edit.
+## getBM performs batch query with your input value: row.names(bra_v)
+## and retrieves the corresponding attributes from Ensembl
+entrez_id <- getBM(
+  # Attributes are the type of converted data
+  attributes = c("entrezgene_id", "ensembl_gene_id"),
+  # Filter is the type of input data
+  filter = "ensembl_gene_id",
+  # Values is the input data
+  values = row.names(counts),
+  # Mart is the conversion database by useMart()
+  mart = ensembl
+)
+
+
+## Check the content of entrez_id by head()
+## We are creating a named vector here, where the names are Ensembl ids
+## and the values are Entrez ids
+conv_dict <- entrez_id$entrezgene_id
+names(conv_dict) <- entrez_id$ensembl_gene_id
+
+## You can later use this to rename your DGEList
+## row.names(dge) <- conv_dict[row.names(dge)]
+## !!Do this after you are done with non-specific filtering!!
+```
+
+## Filter the sample & TMM normalization
+
+Remember we mentioned that genes with low read count are not informative and is often favorable to remove them in a non-specific fashion before analysis. Please only eep genes with more than 1 CPM in at least 6 samples. What is the ratio of genes that are kept? (5%).
+
+After non-specific filtering, let's perform TMM normalization to correct for the "real estate effect" in RNA-Seq (5%).
+
+
+```{r}
+# Load the count matrix as DGEList
+bra <- DGEList(counts = counts)
+
+## Keep genes with more than 1 CPM in at least 6 samples
+isexpr <- rowSums(cpm(bra) > 1) > 6
+sum(isexpr)/nrow(bra)
+
+bra <- bra[isexpr, , keep.lib.size = FALSE]
+
+row.names(bra) <- conv_dict[row.names(bra)]
+
+## TMM normalization
+bra <- calcNormFactors(bra)
+```
+
+Note that we are putting a rather strict threshold to filter, and it is not ideal to drop so many genes. There's not strict criteria on how many genes should be kept or how many reads are considered too low, but in general, we need to consider both the sample and sequencing depth.
+
+For example, the total gene number expressed in blood cells and neurons are different, and this will influence the gene number you see in your profiling.
+
+Since RNA-seq is a sampling experiment, Poisson noise is huge for lowly-expressed genes. However, this does not mean that you cannot study lowly expressed genes. This just means that you need to sequence very deep. As a result, you'll see people who are studying alterative splicing (the expression level of one splicing variant is often low) and non-coding RNAs are often sequencing much deeper to gain power and confidence to deal with lowly-expressed genes/transcripts.
+
+In a very broad sense, if you worry about if you are dropping too many genes, check the raw read count distribution for your dropped genes. If you are dropping genes with more than 10 more reads (The number is arbitrary. To be specific, you might want to estimate the power of your assay...), it could be safe to lower the threshold.
+
+## Model mean-variance relationship with Voom
+
+Then, you'll want to find the mean-variance trend in our sample so you can use it in later analysis. This can be done with `voom()`. Please plot the mean-variance trend (5%).
+
+```{r}
+bra_v <- voom(bra, plot = TRUE)
+```
+
+### Plot an MDS plot to see observe the samples (5%)
+
+After `voom()`, `limma` allows us to visualize the relationship of our samples with dimensionality reduction (MDS) in which **the distance between samples roughly reflect the dissimilarity between them**. The sample names are generated from the metadata, and WT.3.1 means the first technical replicate of the third biological replicate of a wild-type sample.
+
+Please describe your expectation of (1) how replicates should be like in an MDS plot (2) how different genotypes should be like in an MDS plot. Then, plot it with `plotMDS()` and describe what you see. Is your prediction consistent with what you see?
+
+```{r}
+plotMDS(bra_v)
+```
+
+MDS will capture the transcriptomic distances between the samples. We will expect the technical replicates to be close to each other in MDS because they are just re-sequencing of the same library so theoretically all the differences should be technical noise. Similarly, the larger the distinction of gene expression between genotypes, the more likely the wild-type samples will cluster together, while the mutants will be clustered elsewhere.
+
+We can see that consistent with the fact that there are technical replicates, the samples are positioned in pairs in the first two dimensions of the MDS plane. We can also see that wild-type and mutant samples are mostly not mingled, and this is consistent with that wild-type and mutant transcriptome have certain degree of distinction which can be captured in dimensionality reduction.
+
+## Fit linear model and Naive Bayes model with Limma
+
+Limma finds differential expression by fitting linear models with `lmFit()`, and then calculate the statistics with `eBayes()`. Please perform the analysis and plot an MA plot with `plotMA()`. What do you see? (5%)
+
+```{r}
+bra_fit <- lmFit(bra_v, design_mtx)
+bra_fit <- eBayes(bra_fit)
+
+limma::plotMA(bra_fit)
+```
+
+The log fold change appears to be symmetric at 0, which is expected and a key assumption of TMM. There are few genes that have a high fold-change, and many of those are in lowly expressed genes. For those, it will be nice to keep in mind to check not only the fold change in our later analysis but also the normalized expression.
+
+The reason to examine that is that anything divided by something close to 0 will result in a huge fold change, and you might not care about a difference between 0.003 TPM vs 0.0001 TPM even though it is a 30-fold up-regulation. Even if you care, these kind of DEGs warrant additional care and independent validation experiment to make sure they are indeed differentially expressed.
+
+### List top differentially expressed genes
+
+After you are done with differential expression analysis, the list of differentially expressed genes can be retrieved with `topTable()`. Please save the differentially expressed genes that has an adjusted p-value < 0.05 as a csv file and submit it to NYU Classes (5%).
+
+
+```{r}
+# Get all DEGs
+deg <- topTable(bra_fit, coef = "genotypePbxMut",
+                number = nrow(bra))
+
+# Filter DEGs by FDR < 0.05
+deg <- filter(deg, adj.P.Val < 0.05)
+
+write.csv(deg, "result/deg_fdr0.05.csv")
+
+coolmap(bra[deg$ID, ])
+```
+
+
+## GSEA and GO
+
+To better understand the function the differentially regulated genes served, we can perform enrichment analysis to see if functionally similar genes are over-represented in the differentially expressed genes.
+
+### GSEA
+
+We are going to use the hallmark gene set from MSigDB to perform gene set enrichment analysis. After loading the gene set containing `MSigDb/mouse_H_v5p2.rdata`, the first thing you'll notice is that the gene set is documented in Entrez Gene ID (NCBI gene ID), so it's great that we have converted our gene id earlier in the analysis.
+
+Please load the hallmark gene set and perform GSEA, and take the top 10 enriched gene sets for up/down/mixed respectively. `romer()` takes your voom-processed object, and requires you to first convert ids to indices with `ids2indices()`.
+
+Print the 3 tables in this Rmarkdown file (5% each).
+
+```{r}
+# Load mouse hallmark gene sets
+# http://bioinf.wehi.edu.au/software/MSigDB/
+load("MSigDb/mouse_H_v5p2.rdata")
+
+c2t <- ids2indices(Mm.H, row.names(bra_v))
+
+rr <- romer(bra_v, c2t, design = design_mtx, nrot = 1e4)
+```
+
+```{r}
+romerUP <- topRomer(rr, n=10, alt = "up")
+print(romerUP)
+```
+
+```{r}
+romerDOWN <- topRomer(rr, n = 10, alt = "down")
+print(romerDOWN)
+```
+
+```{r}
+romerMIX <- topRomer(rr, n = 10, alt = "mixed")
+print(romerMIX)
+```
+
+### GO enrichment analysis
+
+Another useful gene annotation is gene ontology. To perform GO term enrichment test, `limma` provides a function, `goana`. To use the function, you need `GO.db`,  `org.Mm.eg.db`, and `BiasedUrn` for GO term information, so make sure they are installed from Bioconductor.
+
+`goana()` takes the output of `eBayes()`, and to correct for gene abundance and length, you need to set `trend = TRUE`.
+
+Perform GO enrichment analysis with an FDR threshold of 0.05, and print the top 10 enriched biological process terms (BP) for up-regulated and down-regulated genes with `topGO()` (7.5% each).
+
+
+```{r}
+gotest <- goana(bra_fit, coef = 2, species = "Mm", trend = TRUE, FDR = 0.05)
+
+```
+
+```{r}
+gotest_bp_up <- topGO(gotest, ontolog = "BP", number = 10, sort = "Up")
+print(gotest_bp_up)
+```
+```{r}
+gotest_bp_down <- topGO(gotest, ontolog = "BP", number = 10, sort = "Down")
+print(gotest_bp_down)
+```
+
+### What do you learn from GSEA and GO (bonus 10%, total points capped at 100)
+
+Checking the enriched terms and gene sets, what do you learn from it? Can you make an educated guess about what Pbx is doing in spinal motor neurons?
+
+The main reason to have this here is to give an example of common enrichment analyses and how interpretation can be tricky. To me the first impression of top terms and gene sets for up- and down-regulated genes are that many metabolic-related terms were present. (ATP, mTORC1, glycolysis, OXPHOS...)
+
+Many of the biological process GO terms enriched for down-regulated genes are related to neuronal differentiation, this might provide a context to put things in perspective: Stem cells and neurons have a very different energy profile (probably to fit their individual function of division vs firing).
+
+It can thus be speculated that Pbx1/2/3 might play a role in the differentiation process, and the change of metabolic pathway might be a side effect. Alternatively, Pbx might be a metabolic regulator and the changed energy budget might have an impact on differentiation.
+
+The first hypothesis could be tested by using in vitro motor neuron differentiation model with Pbx gain- and loss-of-function (for example). To examine whether metabolic changes have an impact on motor neuron differentiation, we can try supplying oxidative phosphorylation blocker or directly manipulate the genes involved in OXPHOS and observe the differentiation process. The experiment is suboptimal because OXPHOS is critical to many aspect for cell survival, and a complicated outcome is expected while it's very hard to observe if differentiation is impacted.
+
+Most of the time, GSEA and GO enrichment is more of a way to generate hypothesis in complement to individual differentially expressed genes, and they need extra validation (often experimentally tricky or impossible) to go beyond weak speculation.
+
+Saying so, they are good tools for discovery. If you do not work in neurodevelopment, you might not notice your list is enriched with genes that are reported to involve in neuronal differentiation, but the GO term enrichment analysis captures this part of the story.
